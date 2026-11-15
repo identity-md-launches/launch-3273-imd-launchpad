@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { EMPTY, LaunchForm, type LaunchFields } from "../components/Launch";
 import { JobsBoard, ServicePicker, SwarmCheckout, SwarmStats } from "../components/Swarm";
-import type { Launched } from "../lib/store";
+import { newProjectId, type Launched } from "../lib/store";
 import { TrendingList } from "./Discover";
 
 /** LAUNCH + BUILD WITH SWARM: two independent tracks sharing one brief. */
 export function Home() {
   const [f, setF] = useState<LaunchFields>(EMPTY);
   const [launched, setLaunched] = useState<Launched | null>(null);
+  // One local project ID shared by both tracks, created before either starts.
+  const [project, setProject] = useState(newProjectId);
   const [services, setServices] = useState<string[]>(["website", "image"]);
   const [idea, setIdea] = useState("");
   const [repo, setRepo] = useState("");
@@ -20,13 +22,13 @@ export function Home() {
           <h1 id="hero-title">Idea in. Ecosystem out.</h1>
           <p className="lede">Launch a Solana token in one step while IMD Swarm builds the rest.</p>
           <div className="actions">
-            <a className="button button-small" href="#build">Build with IMD Swarm</a>
+            <a className="button button-small" href="#build" onClick={(e) => { e.preventDefault(); document.getElementById("build")?.scrollIntoView({ block: "start" }); }}>Build with IMD Swarm</a>
             <a className="button button-small hide-sm" href="#/swap">Swap IMD, ETH, SOL</a>
           </div>
         </div>
         <div className="card launch-card">
           <h2 id="launch-title">Launch + build</h2>
-          <LaunchForm f={f} setF={setF} onLaunched={setLaunched} />
+          <LaunchForm f={f} setF={setF} onLaunched={setLaunched} project={project} onReset={() => { setLaunched(null); setProject(newProjectId()); }} />
         </div>
       </section>
 
@@ -44,7 +46,7 @@ export function Home() {
             {services.includes("audit") && <div className="field"><label htmlFor="b-repo">Repository to audit</label><input id="b-repo" value={repo} onChange={(e) => setRepo(e.target.value.trim())} placeholder="https://github.com/…" inputMode="url" /></div>}
           </div>
           <div className="stack">
-            <div className="card"><h2>Pay and start</h2><SwarmCheckout serviceIds={services} idea={brief} token={token} repo={repo} /></div>
+            <div className="card"><h2>Pay and start</h2><SwarmCheckout serviceIds={services} idea={brief} token={token} repo={repo} project={project} /></div>
           </div>
         </div>
       </section>

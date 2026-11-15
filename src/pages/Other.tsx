@@ -6,7 +6,7 @@ import { compact, declined, errMsg, etherscanAddr, etherscanTx, fmtUnits, pct, s
 import { readPool, trade, type PoolState } from "../lib/launchlab";
 import { tokenPairs, type Pair } from "../lib/market";
 import { useRoute } from "../lib/route";
-import { logTx, notify, useStored, type Launched, type SwarmOrder, type TxRecord } from "../lib/store";
+import { belongsTo, logTx, notify, useStored, type Launched, type SwarmOrder, type TxRecord } from "../lib/store";
 import { ERC20 } from "../wallet/eth";
 import { useSolana } from "../wallet/solana";
 import { useWalletSheet } from "../wallet/WalletSheet";
@@ -43,6 +43,7 @@ export function SwarmPage() {
   );
 }
 
+const REFRESH_MS = 30000;
 function useLaunched(mint: string) { const [l] = useStored<Launched[]>("launched", []); return l.find((x) => x.mint === mint); }
 
 export function TokenPage({ mint }: { mint: string }) {
@@ -59,10 +60,25 @@ export function TokenPage({ mint }: { mint: string }) {
   const [watch, setWatch] = useStored<string[]>("watchlist", []);
   const [comments, setComments] = useStored<{ by: string; text: string; at: number }[]>(`comments:${mint}`, []);
   const [draft, setDraft] = useState("");
+  const [fresh, setFresh] = useState<{ at: number | null; failed: boolean }>({ at: null, failed: false });
   useEffect(() => {
-    if (cluster === "mainnet") tokenPairs([mint]).then((p) => setPair(p[0] ?? null)).catch(() => setPair(null)); else setPair(null);
-    readPool(cluster, mint).then(setPool).catch(() => setPool(null));
+    let live = true; let first = true;
+    // Market and curve reads repeat every REFRESH_MS while the tab is visible. A failed refresh keeps the last
+    // good snapshot on screen and says so; only a failed first read shows the token as unavailable.
+    const load = async () => {
+      const [p, c] = await Promise.allSettled([cluster === "mainnet" ? tokenPairs([mint]).then((x) => x[0] ?? null) : Promise.resolve(null), readPool(cluster, mint)]);
+      if (!live) return;
+      if (p.status === "fulfilled") setPair(p.value); else if (first) setPair(null);
+      if (c.status === "fulfilled") setPool(c.value); else if (first) setPool(null);
+      const failed = p.status === "rejected" || c.status === "rejected";
+      setFresh((f) => ({ at: failed ? f.at : Date.now(), failed }));
+      first = false;
+    };
+    void load();
+    const t = setInterval(() => { if (document.visibilityState === "visible") void load(); }, REFRESH_MS);
+    return () => { live = false; clearInterval(t); };
   }, [mint, cluster]);
+  const freshness = fresh.failed ? (fresh.at ? `Refresh failed; showing data from ${new Date(fresh.at).toLocaleTimeString()}. Retrying every ${REFRESH_MS / 1000} s.` : "Live data is unavailable right now. Retrying.") : fresh.at ? `Updated ${new Date(fresh.at).toLocaleTimeString()} · refreshes every ${REFRESH_MS / 1000} s` : "Loading…";
   const name = pair?.baseToken.name ?? local?.name ?? "Token";
   const sym = pair?.baseToken.symbol ?? local?.symbol ?? "";
   const onCurve = pool && !pool.graduated;
@@ -99,7 +115,7 @@ export function TokenPage({ mint }: { mint: string }) {
         <div className="stack">
           {pair ? <iframe className="chart-frame" title={`${sym} price chart`} src={`https://dexscreener.com/solana/${pair.pairAddress}?embed=1&theme=dark&trades=0&info=0`} loading="lazy" /> : <div className="card"><p className="muted">No chart yet. DexScreener lists a token after its first trades on mainnet.</p></div>}
           {pair && <dl className="stats card"><div><dt>Price</dt><dd className="num">{usd(Number(pair.priceUsd))}</dd></div><div><dt>24h</dt><dd className={`num ${(pair.priceChange?.h24 ?? 0) >= 0 ? "up" : "down"}`}>{pct(pair.priceChange?.h24)}</dd></div><div><dt>Market cap</dt><dd className="num">{compact(pair.marketCap ?? pair.fdv)}</dd></div><div><dt>Liquidity</dt><dd className="num">{compact(pair.liquidity?.usd)}</dd></div></dl>}
-          {pair?.txns?.h24 && <div className="card"><h2>Live activity</h2><ul className="activity"><li><span>Buys, last hour</span><span className="num up">{pair.txns.h1?.buys ?? 0}</span></li><li><span>Sells, last hour</span><span className="num down">{pair.txns.h1?.sells ?? 0}</span></li><li><span>Buys, 24h</span><span className="num">{pair.txns.h24.buys}</span></li><li><span>Sells, 24h</span><span className="num">{pair.txns.h24.sells}</span></li><li><span>Volume, 24h</span><span className="num">{usd(pair.volume?.h24)}</span></li></ul></div>}
+          {pair?.txns?.h24 && <div className="card"><h2>Live activity</h2><ul className="activity"><li><span>Buys, last hour</span><span className="num up">{pair.txns.h1?.buys ?? 0}</span></li><li><span>Sells, last hour</span><span className="num down">{pair.txns.h1?.sells ?? 0}</span></li><li><span>Buys, 24h</span><span className="num">{pair.txns.h24.buys}</span></li><li><span>Sells, 24h</span><span className="num">{pair.txns.h24.sells}</span></li><li><span>Volume, 24h</span><span className="num">{usd(pair.volume?.h24)}</span></li></ul><p className={`hint num ${fresh.failed ? "hint-warn" : ""}`} role="status">{freshness}</p></div>}
           <div className="card">
             <h2>Comments</h2>
             <p className="hint">Saved on this device only. The launchpad has no shared comment server yet.</p>
@@ -114,7 +130,7 @@ export function TokenPage({ mint }: { mint: string }) {
             <h2>Trade</h2>
             {onCurve ? (
               <>
-                <div className="progress-block"><div className="field-head"><span>Bonding curve</span><span className="num">{(pool!.progress * 100).toFixed(1)}%</span></div><div className="progress"><span style={{ width: `${pool!.progress * 100}%` }} /></div><p className="hint num">{pool!.raisedSol.toFixed(2)} of {pool!.targetSol.toFixed(0)} SOL raised · {pool!.priceSol.toExponential(3)} SOL per token</p></div>
+                <div className="progress-block"><div className="field-head"><span>Bonding curve</span><span className="num">{(pool!.progress * 100).toFixed(1)}%</span></div><div className="progress"><span style={{ width: `${pool!.progress * 100}%` }} /></div><p className="hint num">{pool!.raisedSol.toFixed(2)} of {pool!.targetSol.toFixed(0)} SOL raised · {pool!.priceSol.toExponential(3)} SOL per token</p>{!pair && <p className={`hint num ${fresh.failed ? "hint-warn" : ""}`} role="status">{freshness}</p>}</div>
                 <div className="segmented" role="group" aria-label="Side">{(["buy", "sell"] as const).map((s) => <button key={s} type="button" aria-pressed={side === s} onClick={() => setSide(s)}>{s === "buy" ? "Buy" : "Sell"}</button>)}</div>
                 <div className="field"><label htmlFor="t-amt">{side === "buy" ? "SOL to spend" : `${sym} to sell`}</label><input id="t-amt" inputMode="decimal" value={amt} onChange={(e) => setAmt(e.target.value)} placeholder="0.0" /></div>
                 <button type="submit" className="button button-primary" disabled={busy}>{busy ? "Confirm in your wallet…" : address ? `${side === "buy" ? "Buy" : "Sell"} on LaunchLab` : "Connect Phantom or Solflare"}</button>
@@ -143,7 +159,7 @@ export function Studio({ mint }: { mint?: string }) {
     <section className="wrap section" aria-labelledby="st-title">
       <h1 id="st-title" className="page-title">Project studio</h1>
       <p className="muted">Every token launched from this device gets a Studio for its token, files, Swarm jobs, branding and ongoing work.</p>
-      {launched.length ? <ul className="token-list">{launched.map((l) => <li key={l.mint} className="token-row"><a className="token-link" href={`#/studio/${l.mint}`}>{l.image ? <img className="thumb" src={l.image} alt="" width={40} height={40} /> : <span className="thumb thumb-empty" />}<span className="token-name"><strong>{l.name}</strong><span className="muted">{l.symbol} · {l.cluster} · {orders.filter((o) => o.mint === l.mint).length} jobs</span></span></a></li>)}</ul> : <p className="muted">No projects yet. <a href="#/">Launch a token</a> or <a href="#/swarm">hire Swarm without one</a>.</p>}
+      {launched.length ? <ul className="token-list">{launched.map((l) => <li key={l.mint} className="token-row"><a className="token-link" href={`#/studio/${l.mint}`}>{l.image ? <img className="thumb" src={l.image} alt="" width={40} height={40} /> : <span className="thumb thumb-empty" />}<span className="token-name"><strong>{l.name}</strong><span className="muted">{l.symbol} · {l.cluster} · {orders.filter((o) => belongsTo(o, l.mint, l)).length} jobs</span></span></a></li>)}</ul> : <p className="muted">No projects yet. <a href="#/">Launch a token</a> or <a href="#/swarm">hire Swarm without one</a>.</p>}
       <h2>Swarm jobs without a token</h2>
       <JobsBoard empty="None." mint={undefined} />
     </section>

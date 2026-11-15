@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useAccount, useBalance, usePublicClient, useReadContract, useSwitchChain, useWriteContract } from "wagmi";
 import { ETH_CHAIN_ID, EXPECTED_JOB_FEE, IMD_EXPLORER, IMD_INTAKE, IMD_TOKEN } from "../config";
 import { declined, errMsg, etherscanAddr, etherscanTx, fmtUnits, short } from "../lib/format";
-import { logTx, notify, updateTx, useStored, type SwarmOrder } from "../lib/store";
-import { PACKAGE, SERVICES, actionId, actionName, buildBody, encodeBody, fingerprint, getAdmission, getJob, getResult, getSwarm, terminal, NO_CALLBACK, type Job, type JobResult, type SwarmHealth, type TokenRef } from "../lib/swarm";
+import { belongsTo, logTx, mintForProject, notify, updateTx, useStored, type Launched, type SwarmOrder } from "../lib/store";
+import { PACKAGE, SERVICES, actionId, actionName, buildBody, encodeBody, fingerprint, getAdmission, getJob, getResult, getSwarm, terminal, assignments, NO_CALLBACK, type Job, type JobResult, type SwarmHealth, type TokenRef } from "../lib/swarm";
 import { ERC20, INTAKE_ABI } from "../wallet/eth";
 import { useWalletSheet } from "../wallet/WalletSheet";
 import { Flow, type FlowItem } from "./Flow";
@@ -32,7 +32,8 @@ export function ServicePicker({ value, onChange }: { value: string[]; onChange(v
 }
 
 /** Pays IMD Intakev2 for each selected service, one job per service, never more than once per brief unless asked. */
-export function SwarmCheckout({ serviceIds, idea, token, repo, parent }: { serviceIds: string[]; idea: string; token?: TokenRef; repo?: string; parent?: string }) {
+/** `project` is the shared local project ID that ties these jobs to a token launched before or after them. */
+export function SwarmCheckout({ serviceIds, idea, token, repo, parent, project }: { serviceIds: string[]; idea: string; token?: TokenRef; repo?: string; parent?: string; project?: string }) {
   const { open } = useWalletSheet();
   const { address, chainId, connector } = useAccount();
   const { switchChain } = useSwitchChain();
@@ -89,7 +90,7 @@ export function SwarmCheckout({ serviceIds, idea, token, repo, parent }: { servi
         const args = [actionId(action), encodeBody(j.body), NO_CALLBACK, IMD_TOKEN, fee!] as const;
         await pc.simulateContract({ account: address, address: IMD_INTAKE, abi: INTAKE_ABI, functionName: "request", args });
         const h = await writeContractAsync({ address: IMD_INTAKE, abi: INTAKE_ABI, functionName: "request", args, chainId: ETH_CHAIN_ID });
-        const order: SwarmOrder = { tx: h, fp: j.fp, service: j.svc.id, label: j.svc.label, objective: String(j.body.objective), at: Date.now(), payer: address, mint: token?.mint };
+        const order: SwarmOrder = { tx: h, fp: j.fp, service: j.svc.id, label: j.svc.label, objective: String(j.body.objective), at: Date.now(), payer: address, mint: token?.mint ?? (project ? mintForProject(project) : undefined), project };
         setOrders((o) => [order, ...o.filter((x) => x.tx !== h)]);
         logTx({ id: h, chain: "ethereum", kind: "swarm", label: `Swarm job: ${j.svc.label}`, status: "pending", account: address });
         const r = await pc.waitForTransactionReceipt({ hash: h });
@@ -139,7 +140,9 @@ export function SwarmCheckout({ serviceIds, idea, token, repo, parent }: { servi
 /** Every paid order with its admission, job state, workers and deliverables. */
 export function JobsBoard({ mint, empty }: { mint?: string; empty?: string }) {
   const [orders] = useStored<SwarmOrder[]>("swarm-orders", []);
-  const list = mint ? orders.filter((o) => o.mint === mint) : orders;
+  const [launched] = useStored<Launched[]>("launched", []);
+  const l = mint ? launched.find((x) => x.mint === mint) : undefined;
+  const list = mint ? orders.filter((o) => belongsTo(o, mint, l)) : orders;
   if (!list.length) return <p className="muted">{empty ?? "No Swarm jobs paid from this device yet."}</p>;
   return <ul className="stack-tight">{list.map((o) => <OrderRow key={o.tx} order={o} />)}</ul>;
 }
@@ -149,6 +152,7 @@ function OrderRow({ order }: { order: SwarmOrder }) {
   const [adm, setAdm] = useState<string>(order.jobId ? "admitted" : "Waiting for the IMD API to read the payment…");
   const [job, setJob] = useState<Job | null>(null);
   const [res, setRes] = useState<JobResult | null>(null);
+  const [resErr, setResErr] = useState("");
   const jobId = order.jobId;
   useEffect(() => {
     if (jobId) return;
@@ -168,15 +172,23 @@ function OrderRow({ order }: { order: SwarmOrder }) {
     if (!jobId) return;
     let live = true; let t: ReturnType<typeof setInterval> | undefined;
     const tick = async () => {
+      let j: Job | null;
+      try { j = await getJob(jobId); } catch { return; /* retry next tick */ }
+      if (!live || !j) return;
+      setJob(j);
+      if (!terminal(j.state)) return;
+      // Stop polling only once the deliverables have actually loaded; a failed read retries next tick.
       try {
-        const j = await getJob(jobId); if (!live || !j) return; setJob(j);
-        if (terminal(j.state)) { clearInterval(t); const r = await getResult(jobId); if (live) setRes(r); }
-      } catch { /* retry next tick */ }
+        const r = await getResult(jobId);
+        if (!live) return;
+        if (r || j.state !== "completed") { clearInterval(t); setRes(r); setResErr(""); }
+        else setResErr("Deliverables aren't published yet. Retrying…");
+      } catch { if (live) setResErr("Deliverables could not load. Retrying…"); }
     };
     void tick(); t = setInterval(tick, 15000);
     return () => { live = false; clearInterval(t); };
   }, [jobId]);
-  const tasks = job?.tasks ?? job?.workflow?.items ?? [];
+  const tasks = assignments(job);
   return (
     <li className="card">
       <div className="section-head"><h3>{order.label}</h3><span className={`pill state-${job?.state ?? "executing"}`}>{job?.state ?? (jobId ? "admitted" : "paid")}</span></div>
@@ -189,13 +201,18 @@ function OrderRow({ order }: { order: SwarmOrder }) {
       </dl>
       {tasks.length > 0 && (
         <ul className="job-steps" aria-label="Worker assignments">
-          {tasks.map((t, i) => <li key={t.id ?? i}><span>{t.role ?? t.skill ?? "task"}{t.seat != null || t.tokenId != null ? ` · seat ${t.seat ?? t.tokenId}` : ""}{t.agentId ? ` · agent ${t.agentId}` : ""}</span><span className={`state-${t.state}`}>{t.state}</span></li>)}
+          {tasks.map((t) => <li key={t.id}><span>{t.label}{t.seat ? ` · seat #${t.seat}` : " · no seat yet"}{t.agent ? ` · agent ${t.agent}` : ""}{t.failure ? <span className="error"> · {t.failure}</span> : null}</span><span className={`state-${t.state}`}>{t.state}</span></li>)}
         </ul>
       )}
-      {res && res.files?.length > 0 && (
-        <div className="stack-tight"><h3>Deliverables</h3><ul className="link-list">{res.files.map((f) => <li key={f.url}><a href={f.url} target="_blank" rel="noreferrer">{f.path}</a> <span className="muted num">{(f.bytes / 1024).toFixed(1)} KB</span></li>)}</ul></div>
-      )}
-      {res?.delivery?.repoUrl && <a href={res.delivery.repoUrl} target="_blank" rel="noreferrer">Delivered repository</a>}
+      {res && (res.files?.length || res.delivery?.repoUrl || res.delivery?.siteUrl || res.source?.length) ? (
+        <div className="stack-tight"><h3>Deliverables</h3><ul className="link-list">
+          {res.files?.map((f) => <li key={f.url}><a href={f.url} target="_blank" rel="noreferrer">{f.path}</a> <span className="muted num">{(f.bytes / 1024).toFixed(1)} KB</span></li>)}
+          {res.delivery?.siteUrl && <li><a href={res.delivery.siteUrl} target="_blank" rel="noreferrer">Published site</a>{res.delivery.ensName && <span className="muted"> {res.delivery.ensName}</span>}</li>}
+          {res.delivery?.repoUrl && <li><a href={res.delivery.repoUrl} target="_blank" rel="noreferrer">Delivered repository</a>{res.delivery.commit && <span className="muted num"> {res.delivery.commit.slice(0, 7)}</span>}</li>}
+          {res.source?.filter((s) => s.url).map((s) => <li key={s.url}><a href={s.url} target="_blank" rel="noreferrer">Source bundle: {s.node.replace(/_/g, " ")}</a></li>)}
+        </ul></div>
+      ) : res && job?.state === "completed" ? <p className="muted">The job completed without published files.</p> : null}
+      {resErr && !res && <p className="hint hint-warn" role="status">{resErr}</p>}
       {jobId && <div className="actions"><a className="button button-small" href={`#/swarm?parent=${jobId}${order.mint ? `&mint=${order.mint}` : ""}`}>Continue this job</a><a className="button button-small button-quiet" href={`${IMD_EXPLORER}/jobs/${jobId}`} target="_blank" rel="noreferrer">Open in IMD Explorer</a></div>}
     </li>
   );

@@ -34,8 +34,26 @@ export function updateTx(id: string, status: TxRecord["status"]) {
 }
 
 /** A launched token, kept so its Studio can be reopened later. */
-export interface Launched { mint: string; name: string; symbol: string; image: string; description?: string; cluster: "devnet" | "mainnet"; creator: string; at: number; signatures: string[] }
-export interface SwarmOrder { tx: string; fp: string; service: string; label: string; objective: string; at: number; payer: string; mint?: string; jobId?: string }
+export interface Launched { mint: string; name: string; symbol: string; image: string; description?: string; cluster: "devnet" | "mainnet"; creator: string; at: number; signatures: string[]; project?: string }
+export interface SwarmOrder { tx: string; fp: string; service: string; label: string; objective: string; at: number; payer: string; mint?: string; jobId?: string; project?: string }
+
+/**
+ * A project is the shared local ID of one Launch + Build session. Token launch and Swarm jobs each
+ * record it, so jobs paid before the mint exists still land in that token's Studio.
+ */
+export const newProjectId = () => `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+export const mintForProject = (project: string) => read<Launched[]>("launched", []).find((l) => l.project === project)?.mint;
+/** After a launch: give every earlier job of the same project the new mint. Runs on its own; neither track waits for it. */
+export function attachMint(project: string, mint: string) {
+  const orders = read<SwarmOrder[]>("swarm-orders", []);
+  if (orders.some((o) => o.project === project && !o.mint)) write("swarm-orders", orders.map((o) => (o.project === project && !o.mint ? { ...o, mint } : o)));
+}
+/** Does a job belong to this token's Studio: by mint, by shared project, or (orders saved before project IDs) by the token named in its brief. */
+export function belongsTo(o: SwarmOrder, mint: string, l?: Launched) {
+  if (o.mint) return o.mint === mint;
+  if (l?.project && o.project) return o.project === l.project;
+  return !!l && !o.project && o.at <= l.at && o.objective.includes(`token is ${l.name} (${l.symbol.toUpperCase()})`);
+}
 
 /** Toast-like status line announced to screen readers. */
 type Note = { text: string; href?: string } | null;

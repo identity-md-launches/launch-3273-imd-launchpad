@@ -39,6 +39,8 @@ export interface Quote {
 }
 
 export class NoRoute extends Error {}
+/** The executable quote returns less than the minimum the visitor reviewed: show it and ask again, never sign it. */
+export class Requote extends Error { constructor(public quote: Quote) { super("The locked quote returns less than the minimum you reviewed. Review the new quote and confirm again."); } }
 const usdS = (n: number) => `$${n < 0.01 ? n.toFixed(4) : n.toFixed(2)}`;
 
 async function getJson(url: string, init?: RequestInit) {
@@ -48,10 +50,21 @@ async function getJson(url: string, init?: RequestInit) {
   try { j = JSON.parse(text); } catch { /* not JSON */ }
   return { ok: r.ok, status: r.status, j };
 }
+/**
+ * A non-success answer that is not the provider's own JSON verdict (HTML error pages, auth, rate limits, outages)
+ * means the service itself is unavailable; that is reported as such, never as missing liquidity.
+ */
+function ensureService(name: string, res: { ok: boolean; status: number; j: any }) {
+  if (res.ok) return;
+  if (res.j == null || typeof res.j !== "object" || [401, 403, 429].includes(res.status) || res.status >= 500)
+    throw new NoRoute(`${name} quote service unavailable (HTTP ${res.status}). Try again later.`);
+}
 
 /** Ethereum to Ethereum: KyberSwap Aggregator, 0x-equivalent and keyless. */
 async function kyberQuote(from: Token, to: Token, amountIn: bigint, slipBps: number): Promise<Quote> {
-  const { j } = await getJson(`${KYBER_API}/routes?tokenIn=${from.address}&tokenOut=${to.address}&amountIn=${amountIn}&gasInclude=true`, { headers: { "x-client-id": "imd-launchpad" } });
+  const res = await getJson(`${KYBER_API}/routes?tokenIn=${from.address}&tokenOut=${to.address}&amountIn=${amountIn}&gasInclude=true`, { headers: { "x-client-id": "imd-launchpad" } });
+  ensureService("KyberSwap", res);
+  const { j } = res;
   const s = j?.data?.routeSummary;
   if (!s) throw new NoRoute(`KyberSwap found no Ethereum route: ${j?.message ?? "no liquidity for this pair and size"}.`);
   const out = BigInt(s.amountOut);
@@ -66,7 +79,9 @@ async function kyberQuote(from: Token, to: Token, amountIn: bigint, slipBps: num
 
 /** Solana to Solana: Jupiter's public Swap API. */
 async function jupQuote(from: Token, to: Token, amountIn: bigint, slipBps: number): Promise<Quote> {
-  const { j } = await getJson(`${JUPITER_API}/swap/v1/quote?inputMint=${from.address}&outputMint=${to.address}&amount=${amountIn}&slippageBps=${slipBps}&restrictIntermediateTokens=true`);
+  const res = await getJson(`${JUPITER_API}/swap/v1/quote?inputMint=${from.address}&outputMint=${to.address}&amount=${amountIn}&slippageBps=${slipBps}&restrictIntermediateTokens=true`);
+  ensureService("Jupiter", res);
+  const { j } = res;
   if (!j?.outAmount) throw new NoRoute(`Jupiter found no Solana route: ${j?.error ?? j?.errorCode ?? "no liquidity for this pair and size"}.`);
   return {
     provider: "Jupiter", from, to, amountIn, amountOut: BigInt(j.outAmount), minOut: BigInt(j.otherAmountThreshold),
@@ -80,7 +95,9 @@ async function jupQuote(from: Token, to: Token, amountIn: bigint, slipBps: numbe
 async function lifiQuote(from: Token, to: Token, amountIn: bigint, slipBps: number, fromAddr?: string, toAddr?: string): Promise<Quote> {
   const fc = from.chain === "ethereum" ? ETH_CHAIN_ID : LIFI_SOLANA_CHAIN, tc = to.chain === "ethereum" ? ETH_CHAIN_ID : LIFI_SOLANA_CHAIN;
   if (fromAddr && toAddr) {
-    const { j } = await getJson(`${LIFI_API}/quote?fromChain=${fc}&toChain=${tc}&fromToken=${from.lifi}&toToken=${to.lifi}&fromAmount=${amountIn}&fromAddress=${fromAddr}&toAddress=${toAddr}&slippage=${slipBps / 10000}`);
+    const res = await getJson(`${LIFI_API}/quote?fromChain=${fc}&toChain=${tc}&fromToken=${from.lifi}&toToken=${to.lifi}&fromAmount=${amountIn}&fromAddress=${fromAddr}&toAddress=${toAddr}&slippage=${slipBps / 10000}`);
+    ensureService("LI.FI", res);
+    const { j } = res;
     if (!j?.estimate) throw new NoRoute(`LI.FI found no cross-chain route: ${j?.message ?? "no bridge covers this pair and size right now"}.`);
     const e = j.estimate;
     return {
@@ -90,7 +107,9 @@ async function lifiQuote(from: Token, to: Token, amountIn: bigint, slipBps: numb
       seconds: Number(e.executionDuration) || 60, at: Date.now(), raw: j, executable: true,
     };
   }
-  const { j } = await getJson(`${LIFI_API}/advanced/routes`, { method: "POST", body: JSON.stringify({ fromChainId: fc, toChainId: tc, fromTokenAddress: from.lifi, toTokenAddress: to.lifi, fromAmount: amountIn.toString(), options: { slippage: slipBps / 10000 } }) });
+  const res = await getJson(`${LIFI_API}/advanced/routes`, { method: "POST", body: JSON.stringify({ fromChainId: fc, toChainId: tc, fromTokenAddress: from.lifi, toTokenAddress: to.lifi, fromAmount: amountIn.toString(), options: { slippage: slipBps / 10000 } }) });
+  ensureService("LI.FI", res);
+  const { j } = res;
   const r = j?.routes?.[0];
   if (!r) throw new NoRoute(`LI.FI found no cross-chain route: ${j?.message ?? "no bridge covers this pair and size right now"}.`);
   const steps = r.steps as any[];
@@ -168,7 +187,9 @@ export async function executeSwap(q: Quote, slipBps: number, ctx: { ethAddr?: `0
   if (q.provider === "KyberSwap") {
     const owner = ctx.ethAddr!;
     push({ label: "Build the route", state: "now" });
-    const { j } = await getJson(`${KYBER_API}/route/build`, { method: "POST", headers: { "x-client-id": "imd-launchpad" }, body: JSON.stringify({ routeSummary: (q.raw as any).routeSummary, sender: owner, recipient: owner, slippageTolerance: slipBps }) });
+    const built = await getJson(`${KYBER_API}/route/build`, { method: "POST", headers: { "x-client-id": "imd-launchpad" }, body: JSON.stringify({ routeSummary: (q.raw as any).routeSummary, sender: owner, recipient: owner, slippageTolerance: slipBps }) });
+    ensureService("KyberSwap", built);
+    const { j } = built;
     if (!j?.data?.data) throw new NoRoute(`KyberSwap couldn't build this route: ${j?.message ?? "the quote expired"}. Refresh the quote.`);
     const router = j.data.routerAddress as `0x${string}`;
     if (router.toLowerCase() !== String((q.raw as any).routerAddress).toLowerCase()) throw new Error("The router address changed between quote and build; refusing to sign.");
@@ -189,7 +210,9 @@ export async function executeSwap(q: Quote, slipBps: number, ctx: { ethAddr?: `0
 
   if (q.provider === "Jupiter") {
     push({ label: "Build the transaction", state: "now" });
-    const { j } = await getJson(`${JUPITER_API}/swap/v1/swap`, { method: "POST", body: JSON.stringify({ quoteResponse: q.raw, userPublicKey: ctx.solAddr, dynamicComputeUnitLimit: true, prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports: 1000000, priorityLevel: "high" } } }) });
+    const built = await getJson(`${JUPITER_API}/swap/v1/swap`, { method: "POST", body: JSON.stringify({ quoteResponse: q.raw, userPublicKey: ctx.solAddr, dynamicComputeUnitLimit: true, prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports: 1000000, priorityLevel: "high" } } }) });
+    ensureService("Jupiter", built);
+    const { j } = built;
     if (!j?.swapTransaction) throw new NoRoute(`Jupiter couldn't build this swap: ${j?.error ?? "the quote expired"}. Refresh the quote.`);
     set({ state: "done" });
     push({ label: "Simulate, sign and send", state: "now", detail: "Confirm in your wallet" });
@@ -202,7 +225,8 @@ export async function executeSwap(q: Quote, slipBps: number, ctx: { ethAddr?: `0
   push({ label: "Lock a quote for your two wallets", state: "now" });
   const fresh = await lifiQuote(q.from, q.to, q.amountIn, slipBps, q.from.chain === "ethereum" ? ctx.ethAddr : ctx.solAddr, q.to.chain === "ethereum" ? ctx.ethAddr : ctx.solAddr);
   const lq = fresh.raw as any;
-  if (fresh.minOut < (q.minOut * 97n) / 100n) throw new Error("The cross-chain price moved more than 3% since you reviewed it. Review the new quote.");
+  // The reviewed minimum is a hard floor: anything lower goes back to the visitor for a new review before any signing.
+  if (fresh.minOut < q.minOut) { set({ state: "stop", detail: "The locked quote is below the minimum you reviewed. Nothing was signed." }); throw new Requote(fresh); }
   set({ state: "done", detail: `${fresh.route.join(" → ")}` });
   let srcHash: string;
   if (q.from.chain === "ethereum") {

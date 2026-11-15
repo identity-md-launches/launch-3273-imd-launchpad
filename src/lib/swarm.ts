@@ -60,9 +60,24 @@ export async function getAdmission(tx: string): Promise<Admission> {
   const id = e.admission?.result?.jobId;
   return id ? { kind: "admitted", jobId: id } : { kind: "seen" };
 }
-export interface JobTask { id?: string; role?: string; skill?: string; state?: string; seat?: string | number; tokenId?: number; agentId?: string; worker?: string }
-export interface Job { id: string; state: string; template?: string; blockedReason?: string | null; updatedAt?: string; createdAt?: string; tasks?: JobTask[]; workflow?: { items?: JobTask[] } | null }
+export interface JobTask { id?: string; role?: string; skill?: string; state?: string; seat?: string | number; tokenId?: number | string; agentId?: string; worker?: string }
+/** One workflow node as api.imd.fun/jobs/:id returns it: the assignment, its state and the seat (IMD NFT worker) holding it. */
+export interface JobNode { key: string; role?: string; state?: string; attempt?: number; failureReason?: string | null; updatedAt?: string; seat?: { tokenId?: string | number | null; agentId?: string | number | null } | null }
+export interface Job { id: string; state: string; template?: string; blockedReason?: string | null; updatedAt?: string; createdAt?: string; nodes?: JobNode[] | null; tasks?: JobTask[]; workflow?: { items?: JobTask[] } | null }
+/** A worker assignment ready to render, whichever shape the job used. */
+export interface Assignment { id: string; label: string; state: string; seat?: string; agent?: string; failure?: string }
+export function assignments(job: Job | null): Assignment[] {
+  if (!job) return [];
+  if (job.nodes?.length) return job.nodes.map((n) => ({
+    id: n.key, label: `${n.key.replace(/_/g, " ")}${n.role ? ` (${n.role})` : ""}`, state: n.state ?? "pending",
+    seat: n.seat?.tokenId != null ? String(n.seat.tokenId) : undefined, agent: n.seat?.agentId != null ? String(n.seat.agentId) : undefined, failure: n.failureReason ?? undefined,
+  }));
+  return (job.tasks ?? job.workflow?.items ?? []).map((t, i) => ({
+    id: t.id ?? String(i), label: t.role ?? t.skill ?? "task", state: t.state ?? "pending",
+    seat: t.seat != null ? String(t.seat) : t.tokenId != null ? String(t.tokenId) : undefined, agent: t.agentId,
+  }));
+}
 export const getJob = (id: string) => api<Job>(`/jobs/${encodeURIComponent(id)}`);
-export interface JobResult { state: string; complete: boolean; files: { name: string; path: string; url: string; bytes: number; mediaType: string }[]; delivery?: { repoUrl?: string | null; siteUrl?: string | null; ensName?: string | null } }
+export interface JobResult { state: string; complete: boolean; files: { name: string; path: string; url: string; bytes: number; mediaType: string }[]; source?: { node: string; url?: string; hash?: string }[]; delivery?: { repoUrl?: string | null; commit?: string | null; siteUrl?: string | null; ensName?: string | null } }
 export const getResult = (id: string) => api<JobResult>(`/jobs/${encodeURIComponent(id)}/result`);
 export const terminal = (s?: string) => s === "completed" || s === "blocked" || s === "cancelled";

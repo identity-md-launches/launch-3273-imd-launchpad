@@ -72,11 +72,22 @@ raised 10.11:1, success on surface 10.56:1.
   48px `.sheet-row` rows with 28px marks; Ethereum group (EIP-6963 wallets, Coinbase, MetaMask /
   Rabby install rows, or "Open in" rows on phones) and Solana group (Phantom, Solflare), account
   panels with balance, network switch and disconnect, then recent transactions. Escape, backdrop
-  and × close it.
+  and × close it. While open, Tab and Shift+Tab cycle inside it, the rest of the page is `inert`,
+  and focus returns to the control that opened it.
 - **Flow** (`.flow`): numbered steps with done/now/stop states and explorer links; used for Swarm
   payment and swap status.
 - **Swap card**: amount input + token select row (`.swap-row`), flip button, slippage chips with a
-  custom field, `.facts` list for route, network, rate, minimum, impact, fees and time.
+  custom field (cleared by choosing a chip) and an "Effective limit" hint, `.facts` list for route,
+  network, rate, minimum, impact, fees and time. A cross-chain quote that comes back below the
+  reviewed minimum returns to the review state with an alert before anything is signed.
+- **Swarm job card**: `.card` with a state `.pill`, payment/job facts, a `.job-steps` worker list
+  (node name and role, seat number, agent, state colored `.state-accepted`/`.state-completed` teal,
+  `.state-rejected`/`.state-failed`/`.state-blocked` coral, `.state-executing` amber), a Deliverables
+  link list (files, published site, delivered repository, source bundles), and a `.hint-warn`
+  retry line when the result can't load yet.
+- **Token page freshness**: a `.hint` status line under Live activity (or under the curve when there
+  is no market) reading "Updated hh:mm:ss · refreshes every 30 s", or `.hint-warn` when a refresh
+  failed and the last snapshot is still shown.
 - **Token rows** (`.token-row`): image, name, price, 24h change (`.up`/`.down`), market cap and
   volume (hidden under 40rem), watch star. Skeleton rows while loading.
 - **Stats** (`.stats`): 2 columns, 4 from 40rem. **Progress** bar for the bonding curve.
@@ -89,4 +100,5 @@ At 390 wide the first screen holds the header, the h1 "Idea in. Ecosystem out.",
 the "Build with IMD Swarm" button and the Launch + build card with its first fields. Grids
 collapse to one column below 40rem; the hero and detail pages split into two columns from 60rem.
 The wallet sheet becomes a bottom sheet under 40rem. The nav scrolls horizontally instead of
-wrapping. Rendered layout was not inspected in a browser (see README, Validation).
+wrapping. The hero "Build with IMD Swarm" button scrolls to the builder in place. In the revision,
+`taste.mjs` found no horizontal scroll, overlap or clipping at 320, 390 or 1440 (see README, Validation).

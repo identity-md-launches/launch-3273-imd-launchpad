@@ -12,3 +12,7 @@
 @media (min-width: 60rem) { .hero .launch-card { max-block-size: none; } }
 .tab[aria-pressed="true"] { color: var(--color-text); border-color: var(--color-accent); }
 @media (max-width: 22.49rem) { .swap-row select { max-inline-size: 8.5rem; } }
+
+/* Swarm node states from api.imd.fun (accepted, rejected, failed) */
+.state-accepted{color:var(--color-success)}
+.state-rejected,.state-failed{color:var(--color-error)}

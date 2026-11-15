@@ -4,7 +4,7 @@ import { Flow, type FlowItem } from "../components/Flow";
 import { ETH_CHAIN_ID, OWNER } from "../config";
 import { declined, errMsg, etherscanToken, fmtUnits, solscanToken, toUnits, usd } from "../lib/format";
 import { useRoute } from "../lib/route";
-import { NoRoute, TOKENS, chainLabel, executeSwap, fetchBalances, fetchPrices, getQuote, tokenByKey, type Quote, type Token } from "../lib/swap";
+import { NoRoute, Requote, TOKENS, chainLabel, executeSwap, fetchBalances, fetchPrices, getQuote, tokenByKey, type Quote, type Token } from "../lib/swap";
 import { connectionFor, useSolana } from "../wallet/solana";
 import { useWalletSheet } from "../wallet/WalletSheet";
 
@@ -30,6 +30,7 @@ export function Swap() {
   const [toKey, setToKey] = useState(tokenByKey(query.get("to") ?? "")?.key ?? "IMD");
   const [amount, setAmount] = useState("");
   const [slip, setSlip] = useState(50);
+  const [custom, setCustom] = useState("");
   const [quote, setQuote] = useState<Quote | null>(null);
   const [qState, setQState] = useState<"idle" | "loading" | "error">("idle");
   const [qErr, setQErr] = useState("");
@@ -43,6 +44,7 @@ export function Swap() {
   const from = tokenByKey(fromKey)!, to = tokenByKey(toKey)!;
   const amt = toUnits(amount, from.decimals);
   const cross = from.chain !== to.chain;
+  const customBps = Math.round(Number(custom) * 100);
 
   useEffect(() => { fetchPrices().then(setPrices).catch(() => {}); }, []);
   const refreshBals = () => fetchBalances(ethAddr, solAddr, solConn).then(setBals).catch(() => {});
@@ -50,16 +52,17 @@ export function Swap() {
   useEffect(() => { void refreshBals(); }, [ethAddr, solAddr]);
 
   useEffect(() => {
+    // Every change invalidates in-flight quotes first, so a late answer can't fill in an amount that's gone.
+    const n = ++seq.current;
     setQuote(null); setReview(false); setQErr("");
     if (!amt || amt <= 0n) { setQState("idle"); return; }
-    const n = ++seq.current;
     setQState("loading");
     const run = () => getQuote(from, to, amt, slip, ethAddr, solAddr ?? undefined)
       .then((q) => { if (n === seq.current) { setQuote(q); setQState("idle"); } })
       .catch((e) => { if (n === seq.current) { setQErr(e instanceof NoRoute ? e.message : `The quote service didn't answer: ${errMsg(e)}. Try again.`); setQState("error"); } });
     const t = setTimeout(run, 500);
     const r = setInterval(() => { if (!running) void run(); }, 30000);
-    return () => { clearTimeout(t); clearInterval(r); };
+    return () => { clearTimeout(t); clearInterval(r); seq.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fromKey, toKey, amount, slip, ethAddr, solAddr]);
 
@@ -72,14 +75,16 @@ export function Swap() {
   async function run() {
     if (!quote) return;
     setRunning(true); setXErr(""); setSteps([]);
+    let again = false;
     try {
       await executeSwap(quote, slip, { ethAddr, solAddr: solAddr ?? undefined, solProvider, solConn }, (s) => setSteps(s));
       void refreshBals();
     } catch (e) {
       const m = errMsg(e);
-      setXErr(declined(m) ? "You declined in your wallet. Nothing was sent." : e instanceof NoRoute ? m : `The swap stopped: ${m}`);
+      if (e instanceof Requote) { seq.current++; setQuote(e.quote); again = true; setXErr(m); }
+      else setXErr(declined(m) ? "You declined in your wallet. Nothing was sent." : e instanceof NoRoute ? m : `The swap stopped: ${m}`);
       setSteps((s) => (s ?? []).map((x) => (x.state === "now" ? { ...x, state: "stop" } : x)));
-    } finally { setRunning(false); setReview(false); }
+    } finally { setRunning(false); setReview(again); }
   }
 
   let action: { label: string; onClick?: () => void; disabled?: boolean };
@@ -109,8 +114,9 @@ export function Swap() {
             <div className="swap-row"><input id="s-out" readOnly value={quote ? fmtUnits(quote.amountOut, to.decimals, 6).replace(/,/g, "") : ""} placeholder={qState === "loading" ? "Quoting…" : "0.0"} /><TokenSelect id="s-to" label="Receive" value={toKey} onChange={setToKey} /></div>
           </div>
           <fieldset className="field"><legend>Slippage limit</legend>
-            <div className="actions">{SLIPS.map((s) => <button key={s} type="button" className="button button-small" aria-pressed={slip === s} onClick={() => setSlip(s)}>{s / 100}%</button>)}
-              <label className="visually-hidden" htmlFor="s-slip">Custom slippage percent</label><input id="s-slip" className="select-small slip-input" inputMode="decimal" placeholder="Custom %" onChange={(e) => { const v = Math.round(Number(e.target.value) * 100); if (v > 0 && v <= 5000) setSlip(v); }} /></div>
+            <div className="actions">{SLIPS.map((s) => <button key={s} type="button" className="button button-small" aria-pressed={slip === s && !custom} onClick={() => { setSlip(s); setCustom(""); }}>{s / 100}%</button>)}
+              <label className="visually-hidden" htmlFor="s-slip">Custom slippage percent</label><input id="s-slip" className="select-small slip-input" inputMode="decimal" placeholder="Custom %" value={custom} aria-invalid={custom && !(customBps > 0 && customBps <= 5000) ? true : undefined} onChange={(e) => { const raw = e.target.value.replace(",", "."); setCustom(raw); const v = Math.round(Number(raw) * 100); if (v > 0 && v <= 5000) setSlip(v); else if (!raw) setSlip(50); }} /></div>
+            <p className="hint num">Effective limit: {slip / 100}%{custom && !(customBps > 0 && customBps <= 5000) ? ". Custom values run from 0.01% to 50%." : ""}</p>
             {slip > 300 && <p className="hint hint-warn">High slippage: you may receive much less than quoted.</p>}
           </fieldset>
           {qState === "error" && <p className="error" role="alert">{qErr}</p>}

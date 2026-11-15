@@ -70,24 +70,63 @@ deployed" instead of guessing: `pimdMint`, `pimdWallets`, `revenueWallets`, `met
   - A PIMD quote is refused with the "not deployed" explanation.
   - LI.FI returned USD prices for 7 assets.
   - `dist/index.html` has a title, description, og:title, og:image and favicon, and only relative URLs.
-- Not performed:
-  - Signing real transactions: no funded wallet or browser extension was available. That covers
-    wallet connect, approve/request, the swap send path and a LaunchLab devnet launch.
-  - Any rendered check. The design-critic probe (`taste.mjs`) could not run: Playwright installed
-    outside the repo, but Chromium failed to start because the system library `libatk-1.0.so.0`
-    is missing, and it can't be installed without root. No screenshots were made, the 390 px first
-    screen was not visually confirmed, and console/overflow inspection was not done.
+- Not performed: signing real transactions. No funded wallet or browser extension was available.
+  That covers wallet connect, approve/request, the swap send path and a LaunchLab devnet launch.
+
+### Revision round (2026-11-15): review findings
+
+Fixed after an independent review: Swarm worker assignments now come from the job's `nodes` and their
+`seat`; deliverables polling keeps retrying until the result loads; the token page re-reads market and
+curve data every 30 s while visible and shows when it last updated; jobs paid before a launch share a
+local project ID with it, so they reach that token's Studio; a cross-chain re-quote below the reviewed
+minimum goes back to review instead of signing; the hero button scrolls to the builder; the wallet
+dialog traps focus, makes the page inert and restores focus; custom slippage and presets show one limit;
+clearing the amount drops late quotes; and HTTP failures from quote services read as "unavailable"
+rather than "no liquidity". Answers per finding are in `.imd-responses.json`.
+
+Commands and results for this round:
+
+- `npm ci`, then `npm run typecheck`: passed, no errors. `npm run build`: passed.
+- Browser interaction test (`test/scratch/browser.mjs`): Playwright with headless Chromium against the
+  built `dist/`, served at a stand-in origin. External APIs were answered from captured real responses
+  (job `1496b318…`, its result, DexScreener WSOL, a Jupiter quote), with failures and delays injected,
+  and the clock was driven by Playwright. Chromium's missing system libraries were extracted from
+  Ubuntu packages into a temp directory, outside the repo. **22/22 passed.** The checks: two worker
+  assignments (seat #392 and #874, accepted); a result 503 shows "Deliverables could not load.
+  Retrying…" and recovers on the next poll, then polling stops; the market re-reads after 30 s; a
+  failed refresh keeps the data with a stale notice; the interval stops after navigation; pre-launch
+  jobs show in Studio (shared project ID and the reviewer's legacy record shape); the hero button
+  puts `#build` at the top of the viewport; Shift+Tab and Tab stay inside the wallet dialog, the
+  background is inert, and focus returns to Connect; the custom slippage field clears on a preset;
+  a late quote doesn't fill a cleared amount; a Kyber 403 shows "KyberSwap quote service
+  unavailable (HTTP 403)"; no horizontal overflow at 390; no page errors.
+- Node test (`test/scratch/swap.test.mjs`): the real `executeSwap`/`getQuote`, bundled with wallet
+  modules stubbed. **9/9 passed.** It uses the reviewer's case: 0.5% slippage, reviewed minimum
+  0.995 SOL, re-quote minimum 0.9751 SOL. The swap throws `Requote` before any simulation or send,
+  and hands back the fresh quote. An equal minimum continues to simulation. Kyber 403 HTML, Jupiter
+  429 and LI.FI 502 read as "unavailable". Kyber 400, Jupiter 400 and LI.FI 404 JSON verdicts keep
+  their no-route messages.
+- Design probe (`taste.mjs --out test/scratch/taste`): **all 16 checks passed**. Those are render,
+  layout at 320/390/1440, targets, contrast, casing, tracking, eyebrows, type sizes (4 per width),
+  type faces, glyphs, slogans, repetition, copy budget, chrome, motion and share. The 390 screenshot
+  shows the header, the h1, the lede, the Build with IMD Swarm button and the Launch + build form,
+  with Create & launch on the first screen.
+- Not covered by a browser test: the re-review UI after a `Requote` needs connected wallets. That
+  path is covered by the Node test and by reading `src/pages/Swap.tsx`.
 
 ### Better Interface review (source-level, no browser)
 
-Coverage: the without-a-browser checks of all six domains. Every "with a browser" check is **Not verified**.
+Coverage: the without-a-browser checks of all six domains. In the first round every "with a browser"
+check was **Not verified**. The revision ran the design probe and the Chromium interaction test listed
+above. Contrast, overflow, targets and the 390 first screen are now measured by `taste.mjs`.
 
 - Accessibility: every control has a visible label or `aria-label`. Field errors are bound with
   `aria-describedby`/`aria-invalid`. Focus-visible ring is 2px lime. Skip link, `role="status"` toast,
   dialog with `aria-modal` and Escape. Reduced-motion guard on button press.
   *Finding fixed*: `src/pages/Discover.tsx` used `role="tablist"`/`role="tab"` without arrow-key
   handling. These are now `aria-pressed` toggle buttons in a labelled group.
-  *Open*: the wallet sheet focuses its close button but does not trap focus (`src/wallet/WalletSheet.tsx`).
+  *Fixed in the revision*: the wallet sheet now traps Tab, makes the page behind it `inert` and returns
+  focus to the opener (`src/wallet/WalletSheet.tsx`, checked in Chromium).
 - Layout: logical properties, three breakpoints, one-column collapse.
   *Finding fixed*: the visible "Build with IMD Swarm" hero action was hidden under 40rem
   (`src/pages/Home.tsx`). It now shows at every width.

@@ -2,7 +2,7 @@ import { useState, type ChangeEvent, type FormEvent } from "react";
 import { OWNER } from "../config";
 import { declined, errMsg, solscanTx, toUnits } from "../lib/format";
 import { buildMetadata, createToken } from "../lib/launchlab";
-import { logTx, notify, useStored, type Launched } from "../lib/store";
+import { attachMint, logTx, notify, useStored, type Launched } from "../lib/store";
 import { useSolana } from "../wallet/solana";
 import { useWalletSheet } from "../wallet/WalletSheet";
 
@@ -10,7 +10,8 @@ export interface LaunchFields { name: string; symbol: string; image: string; des
 export const EMPTY: LaunchFields = { name: "", symbol: "", image: "", description: "", website: "", x: "", telegram: "", buy: "", uri: "" };
 
 /** Token track: independent of Swarm. Creates the mint and its LaunchLab curve from the visitor's own wallet. */
-export function LaunchForm({ f, setF, onLaunched }: { f: LaunchFields; setF(f: LaunchFields): void; onLaunched(l: Launched): void }) {
+/** `project` is the shared Launch + Build ID; jobs paid before the mint existed are linked to it after launch. */
+export function LaunchForm({ f, setF, onLaunched, project, onReset }: { f: LaunchFields; setF(f: LaunchFields): void; onLaunched(l: Launched): void; project?: string; onReset?(): void }) {
   const { address, provider, cluster } = useSolana();
   const { open } = useWalletSheet();
   const [, setLaunched] = useStored<Launched[]>("launched", []);
@@ -53,8 +54,9 @@ export function LaunchForm({ f, setF, onLaunched }: { f: LaunchFields; setF(f: L
       }
       setStage({ k: "signing", msg: "Approve the launch in your wallet…" });
       const res = await createToken(cluster, provider, { name: f.name.trim(), symbol: f.symbol.trim(), uri, buyLamports: toUnits(f.buy || "0", 9) ?? 0n });
-      const l: Launched = { mint: res.mint, name: f.name.trim(), symbol: f.symbol.trim(), image: f.image.trim(), description: f.description.trim(), cluster, creator: address, at: Date.now(), signatures: res.signatures };
+      const l: Launched = { mint: res.mint, name: f.name.trim(), symbol: f.symbol.trim(), image: f.image.trim(), description: f.description.trim(), cluster, creator: address, at: Date.now(), signatures: res.signatures, project };
       setLaunched((ls) => [l, ...ls]);
+      if (project) attachMint(project, l.mint);
       res.signatures.forEach((s) => logTx({ id: s, chain: "solana", cluster, kind: "launch", label: `Launch ${l.symbol}`, status: "confirmed", account: address }));
       notify(`${l.symbol} launched on Solana ${cluster}.`, `#/token/${l.mint}`);
       setStage({ k: "done", l }); onLaunched(l);
@@ -76,7 +78,7 @@ export function LaunchForm({ f, setF, onLaunched }: { f: LaunchFields; setF(f: L
         <a className="button" href={`#/studio/${stage.l.mint}`}>Open its Studio</a>
         {stage.l.signatures[0] && <a className="button button-quiet" href={solscanTx(stage.l.signatures[0], stage.l.cluster)} target="_blank" rel="noreferrer">Transaction</a>}
       </div>
-      <button type="button" className="link-button" onClick={() => { setF(EMPTY); setPreview(""); setStage({ k: "form" }); }}>Launch another</button>
+      <button type="button" className="link-button" onClick={() => { setF(EMPTY); setPreview(""); setStage({ k: "form" }); onReset?.(); }}>Launch another</button>
     </div>
   );
   if (stage.k !== "form") return (

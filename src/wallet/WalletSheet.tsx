@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useAccount, useBalance, useConnect, useDisconnect, useSwitchChain, type Connector } from "wagmi";
 import { ETH_CHAIN_ID, type Cluster } from "../config";
 import { etherscanAddr, etherscanTx, fmtUnits, short, solscanAccount, solscanTx } from "../lib/format";
@@ -38,15 +38,38 @@ export function WalletButton() {
   );
 }
 
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 function Sheet({ focus, onClose }: { focus: Focus; onClose(): void }) {
+  const bg = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose); close.current = onClose;
+  // Read during the first render, before autoFocus moves focus to Close.
+  const [opener] = useState(() => document.activeElement as HTMLElement | null);
+  // Modal: the page behind is inert, Tab cycles inside the dialog, and focus returns to the opener on close.
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const others = Array.from(bg.current?.parentElement?.children ?? []).filter((el): el is HTMLElement => el !== bg.current && el instanceof HTMLElement && !el.hasAttribute("inert"));
+    others.forEach((el) => el.setAttribute("inert", ""));
+    const k = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { close.current(); return; }
+      if (e.key !== "Tab" || !box.current) return;
+      const items = Array.from(box.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1], at = document.activeElement;
+      if (!box.current.contains(at)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+      else if (e.shiftKey && at === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
+    };
     addEventListener("keydown", k);
-    return () => removeEventListener("keydown", k);
-  }, [onClose]);
+    return () => {
+      removeEventListener("keydown", k);
+      others.forEach((el) => el.removeAttribute("inert"));
+      if (opener && document.contains(opener)) opener.focus();
+    };
+  }, []);
   return (
-    <div className="sheet-bg" onClick={onClose}>
-      <div className="sheet sheet-wallets" role="dialog" aria-modal="true" aria-labelledby="ws-title" onClick={(e) => e.stopPropagation()}>
+    <div className="sheet-bg" ref={bg} onClick={onClose}>
+      <div className="sheet sheet-wallets" ref={box} role="dialog" aria-modal="true" aria-labelledby="ws-title" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-head">
           <h2 id="ws-title">Wallets</h2>
           <button type="button" className="x" aria-label="Close" onClick={onClose} autoFocus>×</button>
